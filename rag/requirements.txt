@@ -1,0 +1,44 @@
+# Core FastAPI and server
+fastapi==0.115.0
+uvicorn[standard]==0.32.1
+python-dotenv==1.0.1
+pydantic==2.10.3
+
+# AI/ML Libraries - Main providers
+cerebras-cloud-sdk==1.67.0
+cohere==5.20.7
+openai==1.59.5
+tavily-python==0.5.0
+google-search-results==2.4.2
+
+# Vector search and embeddings
+faiss-cpu==1.13.0
+sentence-transformers==3.3.1
+
+# PyTorch stack (FIXED - must match internally)
+torch==2.11.0
+torchvision==0.26.0
+torchaudio==2.11.0
+
+# Transformers and tokenizers (aligned)
+transformers==4.47.1
+tokenizers==0.21.0
+huggingface-hub==0.27.0
+
+# Data processing
+numpy==2.2.1
+pandas==2.2.3
+scikit-learn==1.6.1
+scipy==1.15.1
+
+# HTTP and async
+httpx==0.28.1
+aiohttp==3.11.11
+requests==2.32.3
+
+# Utilities
+python-dateutil==2.9.0.post0
+tqdm==4.67.1
+click==8.1.8
+pyyaml==6.0.2
+typing-extensions==4.12.2
