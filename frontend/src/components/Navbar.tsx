@@ -1,5 +1,5 @@
-import { BookOpen, Moon, Search, Sun, LogOut } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { BookOpen, Moon, Search, Sparkles, Sun, LogOut } from "lucide-react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useClerk, useUser } from "@clerk/clerk-react";
 import { useAuth } from "@clerk/clerk-react";
 import { api } from "@/lib/api";
@@ -12,10 +12,13 @@ interface NavbarProps {
 
 const Navbar = ({ darkMode, onToggleDark }: NavbarProps) => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { signOut } = useClerk();
   const { user } = useUser();
   const { getToken } = useAuth();
   const { toast } = useToast();
+
+  const onPaperPage = location.pathname.startsWith("/generate-paper");
 
   const handleLogout = async () => {
     try {
@@ -51,13 +54,26 @@ const Navbar = ({ darkMode, onToggleDark }: NavbarProps) => {
         </button>
 
         <div className="flex items-center gap-1">
-          <button
-            onClick={() => navigate("/search")}
-            className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-            aria-label="Search"
-          >
-            <Search className="h-4 w-4" />
-          </button>
+          <div className="mr-1 flex items-center gap-1 rounded-lg bg-secondary/50 p-0.5">
+            <button
+              onClick={() => navigate("/search")}
+              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                !onPaperPage ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Search className="h-3.5 w-3.5" />
+              Chat
+            </button>
+            <button
+              onClick={() => navigate("/generate-paper")}
+              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                onPaperPage ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              Generate Paper
+            </button>
+          </div>
           <button
             onClick={onToggleDark}
             className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"

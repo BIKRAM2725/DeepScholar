@@ -9,6 +9,7 @@ import Login from "./pages/Login";
 import SearchPage from "./pages/SearchPage";
 import LoadingPage from "./pages/LoadingPage";
 import ResultsPage from "./pages/ResultsPage";
+import GeneratePaperPage from "./pages/GeneratePaperPage";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -51,6 +52,14 @@ const App = () => {
               element={
                 <ProtectedRoute>
                   <ResultsPage darkMode={darkMode} onToggleDark={toggleDark} />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/generate-paper"
+              element={
+                <ProtectedRoute>
+                  <GeneratePaperPage darkMode={darkMode} onToggleDark={toggleDark} />
                 </ProtectedRoute>
               }
             />
