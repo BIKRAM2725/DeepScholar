@@ -19,6 +19,7 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
 
     const payload = await verifyToken(token, {
       secretKey: process.env.CLERK_SECRET_KEY,
+      clockSkewInMs: 10000, 
     });
 
     req.user = payload;

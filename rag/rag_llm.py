@@ -1,62 +1,113 @@
+# import os
+# from dotenv import load_dotenv
+# from openai import OpenAI
+# from rag_prompts import SCIENTIFIC_QUERY_VALIDATOR_SYSTEM, QUERY_REWRITER_SYSTEM
+
+# load_dotenv()
+
+# client = OpenAI(
+#     base_url="https://api.groq.com/openai/v1",
+#     api_key=os.getenv("GROQ_API_KEY"),
+# )
+# MODEL = "openai/gpt-oss-120b"
+
+
+# def validate_query(query: str) -> bool:
+#     try:
+#         response = client.chat.completions.create(
+#             model=MODEL,
+#             messages=[
+#                 {"role": "system", "content": SCIENTIFIC_QUERY_VALIDATOR_SYSTEM},
+#                 {"role": "user", "content": query},
+#             ],
+#             temperature=0,
+#             max_tokens=100,
+#         )
+#         content = (response.choices[0].message.content or "").strip().lower()
+#         print("validator says:", repr(content))
+#         if content.startswith("valid"):
+#             return True
+#         if content.startswith("invalid"):
+#             return False
+#         print("Unexpected response format during query validation.")
+#         return False
+#     except Exception as e:
+#         print(f"Error validating query: {type(e).__name__}: {e}")
+#         return False
+
+
+# def rewrite_query(query: str):
+#     try:
+#         response = client.chat.completions.create(
+#             model=MODEL,
+#             messages=[
+#                 {"role": "system", "content": QUERY_REWRITER_SYSTEM},
+#                 {"role": "user", "content": query},
+#             ],
+#             temperature=0.1,
+#             max_tokens=200,
+#         )
+#         text = response.choices[0].message.content
+#         return text.strip() if text else query
+#     except Exception as e:
+#         print(f"Error rewriting query: {type(e).__name__}: {e}")
+#         return query
+
+
+
+
 import os
 from dotenv import load_dotenv
-from cerebras.cloud.sdk import Cerebras
+from openai import OpenAI
 from rag_prompts import SCIENTIFIC_QUERY_VALIDATOR_SYSTEM, QUERY_REWRITER_SYSTEM
 
 load_dotenv()
 
-client = Cerebras(api_key=os.getenv("CEREBRAS_API_KEY"))
+client = OpenAI(
+    base_url="https://api.groq.com/openai/v1",
+    api_key=os.getenv("GROQ_API_KEY"),
+)
+MODEL = "openai/gpt-oss-120b"
 
 
 def validate_query(query: str) -> bool:
     try:
         response = client.chat.completions.create(
-            model="qwen-3-235b-a22b-instruct-2507",
+            model=MODEL,
             messages=[
-                {
-                    "role": "system",
-                    "content":  SCIENTIFIC_QUERY_VALIDATOR_SYSTEM
-                },
-                {"role": "user", "content": query}
+                {"role": "system", "content": SCIENTIFIC_QUERY_VALIDATOR_SYSTEM},
+                {"role": "user", "content": query},
             ],
             temperature=0,
-            max_tokens=50
+            max_tokens=500,
         )
-
-        content = response.choices[0].message.content.strip().lower()
-        print(content)
+        print("FULL RESPONSE:", response.choices[0].message)
+        content = (response.choices[0].message.content or "").strip().lower()
+        print("validator says:", repr(content))
         if content.startswith("valid"):
             return True
-        elif content.startswith("invalid"):
+        if content.startswith("invalid"):
             return False
-        else:
-            print("Unexpected response format during query validation.")
-            return False  # fallback for unexpected output
-
-    except Exception:
-        print("Error occurred while validating query.")
+        print("Unexpected response format during query validation.")
+        return False
+    except Exception as e:
+        print(f"Error validating query: {type(e).__name__}: {e}")
         return False
 
 
 def rewrite_query(query: str):
     try:
         response = client.chat.completions.create(
-            model="qwen-3-235b-a22b-instruct-2507",
+            model=MODEL,
             messages=[
                 {"role": "system", "content": QUERY_REWRITER_SYSTEM},
-                {"role": "user", "content": query}
+                {"role": "user", "content": query},
             ],
             temperature=0.1,
-            max_tokens=200
+            max_tokens=200,
         )
-
-        if response and response.choices and response.choices[0].message.content:
-            return response.choices[0].message.content.strip()
-
+        text = response.choices[0].message.content
+        return text.strip() if text else query
+    except Exception as e:
+        print(f"Error rewriting query: {type(e).__name__}: {e}")
         return query
-
-    except Exception:
-        return query
-
-
-

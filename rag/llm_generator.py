@@ -1,72 +1,94 @@
-import os
-from openai import OpenAI
 from rag_prompts import RAG_SYSTEM
+from rag_llm import client, MODEL
 
-client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=os.environ.get("NVIDIA_API_KEY")
-)
+MAX_CONTENT_CHARS = 1500  # keep each source short so the prompt stays focused
+
+
+def clean_results(results):
+    """Drop empty sources and remove duplicate URLs."""
+    cleaned = []
+    seen = set()
+
+    for r in results or []:
+        content = (r.get("content") or "").strip()
+        url = (r.get("url") or "").strip()
+
+        if not content or not url or url in seen:
+            continue
+
+        seen.add(url)
+        cleaned.append({
+            "title": (r.get("title") or "Untitled").strip(),
+            "content": content[:MAX_CONTENT_CHARS],
+            "url": url,
+            "source": r.get("source", ""),
+        })
+
+    return cleaned
 
 
 def build_context(results):
+    """Number each source [1], [2], ... so citations match the Sources list."""
     blocks = []
 
-    for r in results:
-        title = r.get("title", "")
-        content = r.get("content", "")
-        url = r.get("url", "")
-        source = r.get("source", "")
-
-        block = f"""
-Title: {title}
-Content: {content}
-URL: {url}
-Source: {source}
-"""
-        blocks.append(block)
+    for i, r in enumerate(results, 1):
+        blocks.append(
+            f"[{i}]\n"
+            f"Title: {r['title']}\n"
+            f"Content: {r['content']}\n"
+            f"URL: {r['url']}\n"
+            f"Source: {r['source']}"
+        )
 
     return "\n\n".join(blocks)
 
 
 def generate_answer(query, results):
-    context = build_context(results)
+    sources = clean_results(results)
+
+    if not sources:
+        return {
+            "response": "I don't know",
+            "results": "",
+            "sources": [],
+        }
+
+    context = build_context(sources)
 
     messages = [
-        {
-            "role": "system",
-            "content": RAG_SYSTEM
-        },
+        {"role": "system", "content": RAG_SYSTEM},
         {
             "role": "user",
-            "content": f"""
-Context:
-{context}
-
-Question:
-{query}
-"""
-        }
+            "content": (
+                f"<context>\n{context}\n</context>\n\n"
+                f"Question: {query}"
+            ),
+        },
     ]
 
-    completion = client.chat.completions.create(
-        model="nvidia/llama-3.1-nemotron-ultra-253b-v1",
-        messages=messages,
-        temperature=0.6,
-        top_p=0.95,
-        max_tokens=4096,
-        frequency_penalty=0,
-        presence_penalty=0,
-        stream=True
-    )
+    try:
+        completion = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=2048,
+        )
 
-    result = []
+        answer = (completion.choices[0].message.content or "").strip()
 
-    for chunk in completion:
-        if chunk.choices[0].delta.content is not None:
-            print(chunk.choices[0].delta.content, end="")
-            result.append(chunk.choices[0].delta.content)
+        if not answer:
+            answer = "I don't know"
 
-    return {
-        "response": "".join(result),
-        "results": context
-    }
+        return {
+            "response": answer,
+            "results": context,
+            "sources": sources,
+        }
+
+    except Exception as e:
+        print(f"Error generating answer: {type(e).__name__}: {e}")
+        return {
+            "response": "Sorry, something went wrong while generating the answer.",
+            "results": context,
+            "sources": sources,
+        }

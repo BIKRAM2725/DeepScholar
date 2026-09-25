@@ -1,11 +1,6 @@
-import os
-from openai import OpenAI
 from rag_prompts import CONVERSATION_SYSTEM
-client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=os.environ.get("NVIDIA_API_KEY")
-)
-from rag_llm import validate_query
+from rag_llm import client, MODEL, validate_query
+
 
 def build_context(history):
     blocks = []
@@ -20,8 +15,10 @@ Content: {msg}
 
 
 def generate_chat(query, history):
-    
-    if not validate_query(query):
+    history = history or []
+
+    # Validate only the first message; follow-ups like "explain more" are fine
+    if not history and not validate_query(query):
         msg = (
             "Your query does not appear to be a scientific question. "
             "Please ask something that can be answered using scientific "
@@ -29,8 +26,7 @@ def generate_chat(query, history):
         )
         print(f"[Orchestrator] Query rejected: {query}")
         return msg
-    if not history:
-        history = []
+
     context = build_context(history)
 
     messages = [
@@ -50,22 +46,25 @@ Question:
         }
     ]
 
-    completion = client.chat.completions.create(
-        model="nvidia/llama-3.1-nemotron-ultra-253b-v1",
-        messages=messages,
-        temperature=0.6,
-        top_p=0.95,
-        max_tokens=4096,
-        frequency_penalty=0,
-        presence_penalty=0,
-        stream=True
-    )
+    try:
+        completion = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0.6,
+            top_p=0.95,
+            max_tokens=4096,
+            stream=True
+        )
 
-    result = []
+        result = []
 
-    for chunk in completion:
-        if chunk.choices[0].delta.content is not None:
-            print(chunk.choices[0].delta.content, end="")
-            result.append(chunk.choices[0].delta.content)
+        for chunk in completion:
+            if chunk.choices and chunk.choices[0].delta.content is not None:
+                print(chunk.choices[0].delta.content, end="")
+                result.append(chunk.choices[0].delta.content)
 
-    return "".join(result)
+        return "".join(result)
+
+    except Exception as e:
+        print(f"Error generating chat response: {type(e).__name__}: {e}")
+        return "Sorry, something went wrong while generating the answer."
