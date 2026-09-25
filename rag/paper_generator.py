@@ -1,15 +1,18 @@
+
+import base64
 import re
 import time
 from datetime import date
-from urllib.parse import urlparse
 
 from rag_llm import client, MODEL
 from rag_web import search_results
+from citations import format_ieee
 from paper_pdf import (
     bar_chart, build_ieee_pdf, flowchart, image_flowable, metrics_table,
 )
 
 MAX_SOURCES = 12
+MAX_FAISS_SOURCES = 6
 SNIPPET_CHARS = 500
 MAX_STEPS = 8
 
@@ -23,14 +26,11 @@ Rules:
 - Output only the section text. Do not repeat the section title.
 - If subsections are requested, put each subsection title alone on a line that starts with "@@ " (for example "@@ Attention-Based Detectors"), followed by its paragraphs."""
 
-_MONTHS = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "Jun.",
-           "Jul.", "Aug.", "Sept.", "Oct.", "Nov.", "Dec."]
 _ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"]
 _STOP = {"the", "and", "for", "with", "using", "based", "from", "into",
          "that", "this", "via", "over", "under"}
-
-_DELAYS = [4, 12, 25]          # back-off (seconds) after an empty reply / 429
-_use_reasoning = True          # switched off automatically if the API rejects it
+_DELAYS = [4, 12, 25]
+_use_reasoning = True
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +58,7 @@ def _llm(user_prompt, max_tokens=4000):
             msg = str(e)
             print(f"[Paper] LLM error: {type(e).__name__}: {msg[:200]}")
             if _use_reasoning and "reasoning" in msg.lower():
-                _use_reasoning = False        # this client/model rejects it
+                _use_reasoning = False
                 continue
         if attempt < len(_DELAYS):
             time.sleep(_DELAYS[attempt])
@@ -66,7 +66,7 @@ def _llm(user_prompt, max_tokens=4000):
 
 
 # ---------------------------------------------------------------------------
-# Source collection + relevance screening (with real statistics)
+# Source collection: web (+ FAISS in "deep" mode) with relevance screening
 # ---------------------------------------------------------------------------
 def _keywords(topic):
     return [w for w in re.findall(r"[a-z0-9]+", topic.lower())
@@ -81,7 +81,34 @@ def _relevant(source, words):
     return hits >= min(len(words), max(2, len(words) // 2))
 
 
-def collect_sources(topic):
+_FAISS_CACHE: dict = {}
+
+
+def _faiss_sources(topic, top_k=MAX_FAISS_SOURCES):
+    """Your local FAISS index, used only in 'deep' mode. Fails silently
+    (returns []) if the index files aren't built yet, so 'deep' always
+    degrades gracefully to a web-only search instead of crashing."""
+    try:
+        if "index" not in _FAISS_CACHE:
+            from load_index import load_index
+            idx, meta = load_index()
+            _FAISS_CACHE["index"], _FAISS_CACHE["meta"] = idx, meta
+        from rag_retrieval import retrieve
+        hits = retrieve(_FAISS_CACHE["index"], _FAISS_CACHE["meta"],
+                        topic, top_k=top_k) or []
+        return [
+            {"title": (h.get("title") or "Untitled").strip(),
+             "content": (h.get("content") or "").strip(),
+             "url": h["url"], "source": "faiss-index"}
+            for h in hits if h.get("content") and h.get("url")
+        ]
+    except Exception as e:
+        print(f"[Paper] FAISS index unavailable ({type(e).__name__}: {e}); "
+              f"continuing with web sources only.")
+        return []
+
+
+def collect_sources(topic, mode="fast"):
     queries = [topic, f"{topic} review", f"{topic} recent advances",
                f"{topic} methods dataset"]
     raw = []
@@ -91,8 +118,10 @@ def collect_sources(topic):
         except Exception as e:
             print(f"[Paper] search failed for '{q}': {e}")
 
+    faiss_hits = _faiss_sources(topic) if mode == "deep" else []
+
     seen, unique = set(), []
-    for r in raw:
+    for r in faiss_hits + raw:            # FAISS first: your own corpus wins ties
         url = (r.get("url") or "").strip()
         content = (r.get("content") or "").strip()
         if not url or len(content) < 80 or url in seen:
@@ -108,11 +137,13 @@ def collect_sources(topic):
     words = _keywords(topic)
     relevant = [s for s in unique if _relevant(s, words)]
     selected = relevant[:MAX_SOURCES]
-    stats = {"queries": queries, "retrieved": len(raw), "unique": len(unique),
-             "screened": len(relevant), "included": len(selected)}
-    print(f"[Paper] sources: {stats['retrieved']} retrieved, "
-          f"{stats['unique']} unique, {stats['screened']} relevant, "
-          f"{stats['included']} used")
+    stats = {"queries": queries, "retrieved": len(raw) + len(faiss_hits),
+             "unique": len(unique), "screened": len(relevant),
+             "included": len(selected), "faiss_used": len(faiss_hits),
+             "mode": mode}
+    print(f"[Paper] sources ({mode}): {stats['retrieved']} retrieved "
+          f"({stats['faiss_used']} from FAISS), {stats['unique']} unique, "
+          f"{stats['screened']} relevant, {stats['included']} used")
     return selected, stats
 
 
@@ -127,7 +158,6 @@ def _sources_block(sources):
 # Text cleanup
 # ---------------------------------------------------------------------------
 def _fix_cites(text, n_sources):
-    """Expand '[1, 2]' -> '[1], [2]' and drop citation numbers that don't exist."""
     def repl(m):
         nums = [int(x) for x in re.findall(r"\d+", m.group(1))]
         good = [x for x in nums if 1 <= x <= n_sources]
@@ -136,7 +166,6 @@ def _fix_cites(text, n_sources):
 
 
 def _trim_incomplete(text):
-    """If the model was cut off mid-sentence, keep only complete sentences."""
     text = text.rstrip()
     if re.search(r"[.!?][\)\]\"']?$", text):
         return text
@@ -146,10 +175,10 @@ def _trim_incomplete(text):
 
 def _clean_text(text, n_sources):
     text = re.sub(r"[*`]", "", text)
-    text = re.sub(r"(?m)^\s*#+\s*", "", text)               # markdown headings
-    text = re.sub(r"(?m)^\s*(?:[-\u2022]|\d{1,2}[.)])\s+", "", text)  # bullets
+    text = re.sub(r"(?m)^\s*#+\s*", "", text)
+    text = re.sub(r"(?m)^\s*(?:[-\u2022]|\d{1,2}[.)])\s+", "", text)
     text = _fix_cites(text, n_sources)
-    text = re.sub(r"[ \t]+([.,;:])", r"\1", text)           # " ." after a drop
+    text = re.sub(r"[ \t]+([.,;:])", r"\1", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     return _trim_incomplete(text.strip())
 
@@ -164,7 +193,6 @@ def _trim_words(text, max_words):
 
 
 def _blocks(text):
-    """Split section text into ('p', text) and ('sub', title) blocks."""
     blocks, buf = [], []
 
     def flush():
@@ -178,9 +206,9 @@ def _blocks(text):
             flush()
         elif s.startswith("@@"):
             flush()
-            title = s[2:].strip(" :.")
-            if title:
-                blocks.append(("sub", title))
+            t = s[2:].strip(" :.")
+            if t:
+                blocks.append(("sub", t))
         else:
             buf.append(s)
     flush()
@@ -194,19 +222,12 @@ def _parse_keywords(raw, topic):
     return ", ".join(sorted(set(parts), key=str.lower))
 
 
-# ---------------------------------------------------------------------------
-# References (built by code from retrieved sources -> nothing hallucinated)
-# ---------------------------------------------------------------------------
+_MONTHS = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "Jun.",
+           "Jul.", "Aug.", "Sept.", "Oct.", "Nov.", "Dec."]
+
+
 def _ieee_date(d):
     return f"{_MONTHS[d.month - 1]} {d.day}, {d.year}"
-
-
-def _reference(s, accessed):
-    parts = [p.strip() for p in s["title"].split(" | ") if p.strip()]
-    title = (parts[0] if parts else "Untitled").rstrip(".,")
-    venue = ", ".join(parts[1:]) or urlparse(s["url"]).netloc.replace("www.", "")
-    return (f"\u201c{title},\u201d {venue}. Accessed: {accessed}. "
-            f"[Online]. Available: {s['url']}")
 
 
 # ---------------------------------------------------------------------------
@@ -274,17 +295,19 @@ def _fmt(v):
 
 
 def _review_flow(stats):
-    return [
-        f"Records retrieved from\nsearch (n = {stats['retrieved']})",
+    steps = [f"Records retrieved\n(n = {stats['retrieved']})"]
+    if stats.get("faiss_used"):
+        steps[-1] = (f"Records retrieved\n(n = {stats['retrieved']}, incl. "
+                     f"{stats['faiss_used']} from local index)")
+    steps += [
         f"After duplicate removal\n(n = {stats['unique']})",
         f"After relevance screening\n(n = {stats['screened']})",
         f"Included in review\n(n = {stats['included']})",
     ]
+    return steps
 
 
 def _build_figures(flow_steps, flow_caption, metrics, images):
-    """Return ({'method': [...], 'results': [...]}, {'method': [...], ...})
-    -> (blocks per section, mention-hints per section)."""
     blocks = {"method": [], "results": []}
     hints = {"method": [], "results": []}
     fig_no = tab_no = 0
@@ -321,7 +344,6 @@ def _build_figures(flow_steps, flow_caption, metrics, images):
 
 
 def _inject(blocks, extras):
-    """Place figures/tables right after the section's first paragraph."""
     if not extras:
         return blocks
     first_p = next((i for i, b in enumerate(blocks) if b[0] == "p"), None)
@@ -330,30 +352,45 @@ def _inject(blocks, extras):
 
 
 # ---------------------------------------------------------------------------
-# Main entry
+# Streaming generator: yields progress, then a final "done" event
 # ---------------------------------------------------------------------------
-def generate_paper_pdf(topic, notes="", authors="Author Name", steps=None,
-                       metrics=None, images=None, title=None):
+def generate_paper_stream(topic, notes="", authors="Author Name", steps=None,
+                          metrics=None, images=None, title=None, mode="fast"):
     """
+    mode    : "fast" (web search only) or "deep" (web + your FAISS index)
     steps   : list[str]   your own pipeline steps for the flowchart
     metrics : dict        your REAL results, e.g. {"Precision": 0.91}
     images  : list[dict]  [{"caption": str, "data": bytes}] your own figures
-    title   : str         optional fixed title (otherwise the LLM proposes one)
+    title   : str         optional fixed title
+
+    Yields dicts:
+      {"type": "progress", "step": <label>, "index": i, "total": n}
+      {"type": "error", "message": <str>}                     (terminal)
+      {"type": "done", "pdf_base64": <str>, "title": <str>,
+       "sources_used": <int>, "mode": <str>}                  (terminal)
     """
+    mode = mode if mode in ("fast", "deep") else "fast"
     notes = (notes or "").strip()
     metrics = {str(k): float(v) for k, v in (metrics or {}).items()}
     images = images or []
     experiment = bool(notes or metrics or images)
+    plan = _plan(experiment)
+    total = len(plan) + 3   # + abstract, keywords/title, final assembly
 
-    # Validate pictures first so a bad upload fails fast (before any LLM call)
-    image_items = [(image_flowable(i["data"]), (i.get("caption") or "Figure.").strip())
-                   for i in images]
+    try:
+        image_items = [(image_flowable(i["data"]),
+                        (i.get("caption") or "Figure.").strip()) for i in images]
+    except ValueError as e:
+        yield {"type": "error", "message": str(e)}
+        return
 
-    sources, stats = collect_sources(topic)
+    yield {"type": "progress", "step": f"Collecting sources ({mode} mode)",
+           "index": 0, "total": total}
+    sources, stats = collect_sources(topic, mode)
     if not sources:
-        raise ValueError("No relevant sources found for this topic.")
+        yield {"type": "error", "message": "No relevant sources found for this topic."}
+        return
 
-    # ---- what the LLM is allowed to know about the author's own work ----
     author_facts = notes
     if metrics:
         author_facts += "\nReported metrics: " + ", ".join(
@@ -361,15 +398,17 @@ def generate_paper_pdf(topic, notes="", authors="Author Name", steps=None,
 
     review_facts = (
         "Search queries used: " + "; ".join(stats["queries"]) + ". "
-        f"Records retrieved: {stats['retrieved']}. After removing duplicates "
-        f"and empty records: {stats['unique']}. After automated relevance "
-        f"screening (keyword overlap between the topic and each record's title "
-        f"and text snippet): {stats['screened']}. The first {stats['included']} "
-        f"relevant records in search-rank order were included. Sources are web "
-        f"search results (journal and publisher pages)."
+        f"Records retrieved: {stats['retrieved']}"
+        + (f" (including {stats['faiss_used']} from the local research index)"
+           if stats.get("faiss_used") else "") +
+        f". After removing duplicates and empty records: {stats['unique']}. "
+        f"After automated relevance screening (keyword overlap between the "
+        f"topic and each record's title and text snippet): {stats['screened']}. "
+        f"The first {stats['included']} relevant records in search-rank order "
+        f"were included. Sources are web search results and, when available, "
+        f"the author's own indexed research corpus."
     )
 
-    # ---- flowchart + figures ----
     flow_steps = [s.strip() for s in (steps or []) if s and s.strip()][:MAX_STEPS]
     flow_caption = "Workflow of the study."
     if not flow_steps and not experiment:
@@ -381,7 +420,10 @@ def generate_paper_pdf(topic, notes="", authors="Author Name", steps=None,
     src = _sources_block(sources)
     done, sections, failed = {}, [], 0
 
-    for key, heading, instruction in _plan(experiment):
+    for i, (key, heading, instruction) in enumerate(plan, 1):
+        yield {"type": "progress", "step": f"Writing {heading}",
+               "index": i, "total": total}
+
         hint = fig_hints.get(key)
         extra = (" Refer to " + "; ".join(hint) + " in the text.") if hint else ""
         facts = ("\n\nReview facts (the ONLY description of the review process "
@@ -398,7 +440,6 @@ def generate_paper_pdf(topic, notes="", authors="Author Name", steps=None,
             f"Previously written sections (for consistency, do not repeat):\n"
             f"{prior or '(none yet)'}"
         )
-        print(f"[Paper] writing: {heading}")
         text = _clean_text(_llm(prompt), len(sources))
         if not text:
             failed += 1
@@ -410,10 +451,10 @@ def generate_paper_pdf(topic, notes="", authors="Author Name", steps=None,
         })
 
     if failed >= 3:
-        raise RuntimeError("The language model returned no content "
-                           "(check the API key / rate limits).")
+        yield {"type": "error", "message": "The language model returned no "
+              "content (check the API key / rate limits)."}
+        return
 
-    # ---- abstract, keywords, title: written last, from the finished body ----
     body = "\n\n".join(f"{k.upper()}: {v[:900]}" for k, v in done.items())
     rule = ("This is a literature review: describe it as a review and do not "
             "mention experiments, a proposed model or original results."
@@ -421,7 +462,8 @@ def generate_paper_pdf(topic, notes="", authors="Author Name", steps=None,
             "Use ONLY facts from the paper content and the author's notes; "
             "never add numbers that are not in them.")
 
-    print("[Paper] writing: abstract")
+    yield {"type": "progress", "step": "Writing abstract and keywords",
+           "index": len(plan) + 1, "total": total}
     abstract = _trim_words(_clean_text(_llm(
         f"Write a single-paragraph abstract of NO MORE THAN 180 words for this "
         f"paper on '{topic}'. No citations, no equations. {rule}\n\n"
@@ -439,13 +481,38 @@ def generate_paper_pdf(topic, notes="", authors="Author Name", steps=None,
             f"{' (a literature review)' if not experiment else ''}. "
             f"Output only the title, no quotes.", max_tokens=1500)
         title = raw_title.splitlines()[0].strip(" \"'*#.") if raw_title else ""
+    title = title or topic.title()
 
+    yield {"type": "progress", "step": "Formatting references and building PDF",
+           "index": len(plan) + 2, "total": total}
     accessed = _ieee_date(date.today())
-    return build_ieee_pdf(
-        title=title or topic.title(),
-        authors=authors,
+    references = [format_ieee(s, accessed) for s in sources]
+
+    pdf = build_ieee_pdf(
+        title=title, authors=authors,
         abstract=abstract or "Abstract could not be generated.",
-        keywords=keywords,
-        sections=sections,
-        references=[_reference(s, accessed) for s in sources],
+        keywords=keywords, sections=sections, references=references,
     )
+
+    yield {"type": "progress", "step": "Done", "index": total, "total": total}
+    yield {
+        "type": "done",
+        "pdf_base64": base64.b64encode(pdf).decode("ascii"),
+        "title": title,
+        "sources_used": len(sources),
+        "mode": mode,
+    }
+
+
+def generate_paper_pdf(topic, notes="", authors="Author Name", steps=None,
+                       metrics=None, images=None, title=None, mode="fast"):
+    """Non-streaming wrapper: drains generate_paper_stream and returns PDF bytes."""
+    for event in generate_paper_stream(topic, notes, authors, steps, metrics,
+                                       images, title, mode):
+        if event["type"] == "error":
+            if "No relevant sources" in event["message"]:
+                raise ValueError(event["message"])
+            raise RuntimeError(event["message"])
+        if event["type"] == "done":
+            return base64.b64decode(event["pdf_base64"])
+    raise RuntimeError("Paper generation ended without producing a PDF.")
